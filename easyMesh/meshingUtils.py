@@ -81,11 +81,10 @@ def get_mesh_parameters(automesher):
         automesher.max_res_compare = automesher.min_cellsize_compare + 0.25 * automesher.min_cellsize_compare
 
         if automesher.global_mesh_setup.get('num_lines', None) is not None:
-            automesher.num_lines = automesher.global_mesh_setup.get('num_lines')+2
+            automesher.num_lines = automesher.global_mesh_setup.get('num_lines')
 
-        automesher.max_cellsize = automesher.global_mesh_setup.get('max_cellsize', get_mesh_res()[0])  
-        # automesher.min_cellsize = automesher.global_mesh_setup.get('min_cellsize', automesher.mesh_res / 4)
-        automesher.min_cellsize = automesher.mesh_res / 4
+        automesher.max_cellsize = automesher.global_mesh_setup.get('max_cellsize', get_mesh_res()[0])
+        automesher.min_cellsize = automesher.global_mesh_setup.get('min_cellsize', automesher.mesh_res / 4)
         automesher.max_res = automesher.min_cellsize + 0.25 * automesher.min_cellsize
 
 def adjust_mesh_parameters(automesher, unique_xedges, unique_yedges, z_coords, diagonal_edges, mesh_data):
@@ -99,9 +98,10 @@ def adjust_mesh_parameters(automesher, unique_xedges, unique_yedges, z_coords, d
             distance_smaller_than_min_cellsize_z = []
             automesher.min_cellsize_changed = False
             automesher.min_cellsize_z_changed = False
-            automesher.min_cellsize_z = automesher.min_cellsize
+            # min_cellsize_z: use global override if provided, else default to min_cellsize
+            automesher.min_cellsize_z = automesher.global_mesh_setup.get('min_cellsize_z', automesher.min_cellsize)
             automesher.mesh_res_z = automesher.mesh_res
-            automesher.max_res_z = automesher.max_res
+            automesher.max_res_z = automesher.min_cellsize_z + 0.25 * automesher.min_cellsize_z
             # if automesher.global_mesh_setup.get('min_cellsize', None) is None:
             for i in range(len(unique_xedges) - 1):
                 condition1 = abs(unique_xedges[i + 1][0] - unique_xedges[i][0]) <= automesher.min_cellsize_compare and abs(unique_xedges[i + 1][0] - unique_xedges[i][0]) >= 1.5
