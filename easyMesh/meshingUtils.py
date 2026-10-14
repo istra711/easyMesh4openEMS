@@ -204,14 +204,17 @@ def get_mesh_map(automesher):
                     tmp_z.extend(geometryUtils.collect_z_coordinates(primitives))
 
                 else:
-                    # If the polygon is a single primitive, get its x and y coordinates                            
-                    prim_x_coords, prim_y_coords = primitives.GetCoords()[0], primitives.GetCoords()[1]
-                    tmp_x.extend(prim_x_coords)
-                    tmp_y.extend(prim_y_coords)
-                    # Process the single polygon to extract edges and coordinates
-                    geometryUtils.process_single_polygon(automesher, primitives, tmp_x, tmp_y, tmp_x_edges, tmp_y_edges, tmp_diagonal_edges)   
-                    # Collect z-coordinates from the single polygon
-                    tmp_z.extend(geometryUtils.collect_z_coordinates([primitives]))
+                    # Single primitive — Polyhedron has no GetCoords; use AABB
+                    if hasattr(primitives, 'GetCoords'):
+                        prim_x_coords, prim_y_coords = primitives.GetCoords()[0], primitives.GetCoords()[1]
+                        tmp_x.extend(prim_x_coords)
+                        tmp_y.extend(prim_y_coords)
+                        geometryUtils.process_single_polygon(automesher, primitives, tmp_x, tmp_y, tmp_x_edges, tmp_y_edges, tmp_diagonal_edges)
+                        tmp_z.extend(geometryUtils.collect_z_coordinates([primitives]))
+                    else:
+                        tmp_x_edges, tmp_y_edges, tmp_diagonal_edges2 = [], [], []
+                        geometryUtils.process_primitive(automesher, primitives, tmp_x, tmp_y, tmp_x_edges, tmp_y_edges, tmp_diagonal_edges)
+                        tmp_z.extend(geometryUtils.collect_z_coordinates([primitives]))
                 tmp_z = [(z[0]) for z in tmp_z]
 
                 # Only add boundaries if we have valid z-coordinates

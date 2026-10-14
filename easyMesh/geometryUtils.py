@@ -76,54 +76,131 @@ def transfer_port_to_polygon(start, stop):
     port_coords_z = [start[2], stop[2]]
     return port_coords_x, port_coords_y, port_coords_z
 
+
+def _is_polyhedron_type(prim) -> bool:
+    """True for CSPrimPolyhedron / CSPrimPolyhedronReader (no GetCoords API)."""
+    if not hasattr(prim, 'GetType'):
+        return False
+    try:
+        tn = (prim.GetTypeName() or '').lower() if hasattr(prim, 'GetTypeName') else ''
+        if 'polyhedron' in tn:
+            return True
+    except Exception:
+        pass
+    try:
+        t = prim.GetType()
+    except Exception:
+        return False
+    for n in ('POLYHEDRON', 'POLYHEDRONREADER'):
+        v = getattr(CSPrimitives.PrimitiveType, n, None)
+        if v is None:
+            continue
+        if t == v:
+            return True
+        try:
+            if int(t) == int(v):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _prim_aabb_xy_z(prim):
+    """Return (x_coords, y_coords, z_min, z_max) from a polyhedron AABB."""
+    if not hasattr(prim, 'GetBoundBox'):
+        return None
+    bb = prim.GetBoundBox()
+    if bb is None:
+        return None
+    try:
+        lo, hi = bb[0], bb[1]
+        xmin, ymin, zmin = float(lo[0]), float(lo[1]), float(lo[2])
+        xmax, ymax, zmax = float(hi[0]), float(hi[1]), float(hi[2])
+    except Exception:
+        return None
+    if not all(np.isfinite([xmin, ymin, zmin, xmax, ymax, zmax])):
+        return None
+    x_coords = [xmin, xmax, xmax, xmin, xmin]
+    y_coords = [ymin, ymin, ymax, ymax, ymin]
+    return x_coords, y_coords, zmin, zmax
+
+
+def _handle_polyhedron(automesher, prim, x, y, x_edges, y_edges, diagonal_edges):
+    data = _prim_aabb_xy_z(prim)
+    if data is None:
+        return
+    x_coords, y_coords, _zmin, _zmax = data
+    x.extend(x_coords)
+    y.extend(y_coords)
+    collect_edges(x_coords, y_coords, prim, x_edges, y_edges, diagonal_edges)
+
+
 def process_primitive(automesher, prim, x, y, x_edges, y_edges, diagonal_edges):
     if not hasattr(prim, 'GetType'):
         port_coords_x, port_coords_y, port_coords_z = transfer_port_to_polygon(prim.start, prim.stop)
         x.extend(port_coords_x)
         y.extend(port_coords_y)
         collect_edges(port_coords_x, port_coords_y, prim, x_edges, y_edges, diagonal_edges)
-    elif prim.GetType() == CSPrimitives.PrimitiveType.BOX:
+        return
+    ptype = prim.GetType()
+    if ptype == CSPrimitives.PrimitiveType.BOX:
         box_coords_x, box_coords_y, box_coords_z = tranfer_box_to_polygon(prim)
         x.extend(box_coords_x)
         y.extend(box_coords_y)
         collect_edges(box_coords_x, box_coords_y, prim, x_edges, y_edges, diagonal_edges)
+        return
+    if _is_polyhedron_type(prim):
+        _handle_polyhedron(automesher, prim, x, y, x_edges, y_edges, diagonal_edges)
+        return
+    if ptype == CSPrimitives.PrimitiveType.CYLINDER:
+        start = prim.GetStart()
+        stop = prim.GetStop()
+        radius = prim.GetRadius()
+        # Contribute BOTH end discs: a cylinder along x/y would otherwise only
+        # register the start end and the mesh (and with it the FDTD domain)
+        # stops inside the wire. For z-cylinders start/stop share x/y, so the
+        # extra entries are duplicates and get de-duplicated downstream.
+        for end in (start, stop):
+            x_vals = [end[0] - radius, end[0] + radius]
+            y_vals = [end[1] - radius, end[1] + radius]
+            x.extend(x_vals)
+            y.extend(y_vals)
+            x_edges.append([x_vals[0], y_vals[0], y_vals[1], prim, False])
+            x_edges.append([x_vals[1], y_vals[0], y_vals[1], prim, False])
+            y_edges.append([y_vals[0], x_vals[0], x_vals[1], prim, False])
+            y_edges.append([y_vals[1], x_vals[0], x_vals[1], prim, False])
+        automesher.found_circles.append([[start[0]-radius,start[0]+radius],[start[1]-radius, start[1]+radius]])
+        return
+    if ptype == CSPrimitives.PrimitiveType.CYLINDRICALSHELL:
+        start = prim.GetStart()
+        stop = prim.GetStop()
+        radius = prim.GetRadius()
+        thickness = prim.GetShellWidth()
+        outer = radius + thickness / 2
+        for end in (start, stop):
+            x.extend([end[0] - outer, end[0] + outer])
+            y.extend([end[1] - outer, end[1] + outer])
+            for rr in (radius, outer):
+                x_vals = [end[0] - rr, end[0] + rr]
+                y_vals = [end[1] - rr, end[1] + rr]
+                x_edges.append([x_vals[0], y_vals[0], y_vals[1], prim, False])
+                x_edges.append([x_vals[1], y_vals[0], y_vals[1], prim, False])
+                y_edges.append([y_vals[0], x_vals[0], x_vals[1], prim, False])
+                y_edges.append([y_vals[1], x_vals[0], x_vals[1], prim, False])
+        automesher.found_circles.append([[start[0]-radius,start[0]+radius],[start[1]-radius, start[1]+radius]])
+        automesher.found_circles.append([[start[0]-radius-thickness/2,start[0]+radius+thickness/2],[start[1]-radius-thickness/2, start[1]+radius+thickness/2]])
+        return
+    if hasattr(prim, 'GetCoords'):
+        xx, yy = prim.GetCoords()[0], prim.GetCoords()[1]
+        x.extend(xx)
+        y.extend(yy)
+        if xx[-1] != xx[0] or yy[-1] != yy[0]:
+            xx = np.append(xx, xx[0])
+            yy = np.append(yy, yy[0])
+        collect_edges(xx, yy, prim, x_edges, y_edges, diagonal_edges)
     else:
-        if not prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER and not prim.GetType() == CSPrimitives.PrimitiveType.CYLINDRICALSHELL:
-            xx, yy = prim.GetCoords()[0], prim.GetCoords()[1]   
-            x.extend(xx)
-            y.extend(yy)
-            if xx[-1] != xx[0] or yy[-1] != yy[0]:
-                xx = np.append(xx, xx[0])
-                yy = np.append(yy, yy[0])
-            collect_edges(xx, yy, prim, x_edges, y_edges, diagonal_edges)
-        if prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER:
-            start = prim.GetStart()
-            stop = prim.GetStop()
-            radius = prim.GetRadius()
-            x.extend([start[0]-radius, start[0]+radius])
-            y.extend([start[1]-radius, start[1]+radius])
-            x_edges.append([start[0]-radius, start[1] - radius, start[1] + radius, prim, False])
-            x_edges.append([start[0]+radius, start[1] - radius, start[1] + radius, prim, False])
-            y_edges.append([start[1]-radius, start[0] - radius, start[0] + radius, prim, False])
-            y_edges.append([start[1]+radius, start[0] - radius, start[0] + radius, prim, False])
-            automesher.found_circles.append([[start[0]-radius,start[0]+radius],[start[1]-radius, start[1]+radius]])
-        if prim.GetType() == CSPrimitives.PrimitiveType.CYLINDRICALSHELL:
-            start = prim.GetStart()
-            stop = prim.GetStop()
-            radius = prim.GetRadius()
-            thickness = prim.GetShellWidth()
-            x.extend([start[0]-radius-thickness/2, start[0]+radius+thickness/2])
-            y.extend([start[1]-radius-thickness/2, start[1]+radius+thickness/2])
-            x_edges.append([start[0]-radius, start[1] - radius, start[1] + radius, prim, False])
-            x_edges.append([start[0]+radius, start[1] - radius, start[1] + radius, prim, False])
-            x_edges.append([start[0]-radius-thickness/2, start[1] - radius - thickness/2, start[1] + radius + thickness/2, prim, False])
-            x_edges.append([start[0]+radius+thickness/2, start[1] - radius - thickness/2, start[1] + radius + thickness/2, prim, False])
-            y_edges.append([start[1]-radius, start[0] - radius, start[0] + radius, prim, False])
-            y_edges.append([start[1]+radius, start[0] - radius, start[0] + radius, prim, False])
-            y_edges.append([start[1]-radius-thickness/2, start[0] - radius - thickness/2, start[0] + radius + thickness/2, prim, False])
-            y_edges.append([start[1]+radius+thickness/2, start[0] - radius - thickness/2, start[0] + radius + thickness/2, prim, False])
-            automesher.found_circles.append([[start[0]-radius,start[0]+radius],[start[1]-radius,start[1]+radius]])
-            automesher.found_circles.append([[start[0]-radius-thickness/2,start[0]+radius+thickness/2],[start[1]-radius-thickness/2,start[1]+radius+thickness/2]])
+        _handle_polyhedron(automesher, prim, x, y, x_edges, y_edges, diagonal_edges)
+
 
 def collect_edges(x_coords, y_coords, prim, x_edges, y_edges, diagonal_edges):
     for i in range(len(x_coords) - 1):
@@ -135,18 +212,41 @@ def collect_edges(x_coords, y_coords, prim, x_edges, y_edges, diagonal_edges):
             y_edges.append([y_coords[i], x_coords[i], x_coords[i + 1], prim, False])
 
 def collect_z_coordinates(polygon):
-    z = [(prim.GetElevation(), prim) for prim in polygon if hasattr(prim, 'GetType') and prim.GetType() != CSPrimitives.PrimitiveType.BOX and prim.GetType() != CSPrimitives.PrimitiveType.CYLINDER and prim.GetType() != CSPrimitives.PrimitiveType.CYLINDRICALSHELL]
-    z.extend((prim.GetElevation() + prim.GetLength(), prim) for prim in polygon if hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.LINPOLY)
-    z.extend((prim.GetStart()[2], prim) for prim in polygon if hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER)
-    z.extend((prim.GetStart()[2], prim) for prim in polygon if hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.CYLINDRICALSHELL)
-    z.extend((prim.GetStop()[2], prim) for prim in polygon if hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER)
-    z.extend((prim.GetStop()[2], prim) for prim in polygon if hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.CYLINDRICALSHELL)
-
-    box_coords_z = [(tranfer_box_to_polygon(prim)[2][0], prim) for prim in polygon if hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.BOX]
-    box_coords_z.extend((tranfer_box_to_polygon(prim)[2][1], prim) for prim in polygon if hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.BOX)
+    z = []
+    for prim in polygon:
+        if not hasattr(prim, 'GetType'):
+            continue
+        if _is_polyhedron_type(prim):
+            data = _prim_aabb_xy_z(prim)
+            if data is not None:
+                z.append((data[2], prim))
+                z.append((data[3], prim))
+            continue
+        if prim.GetType() == CSPrimitives.PrimitiveType.BOX:
+            box_coords_z = tranfer_box_to_polygon(prim)[2]
+            z.append((box_coords_z[0], prim))
+            z.append((box_coords_z[1], prim))
+        elif prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER:
+            z.append((prim.GetStart()[2], prim))
+            z.append((prim.GetStop()[2], prim))
+        elif prim.GetType() == CSPrimitives.PrimitiveType.CYLINDRICALSHELL:
+            z.append((prim.GetStart()[2], prim))
+            z.append((prim.GetStop()[2], prim))
+        else:
+            try:
+                z.append((prim.GetElevation(), prim))
+            except Exception:  # noqa: BLE001
+                data = _prim_aabb_xy_z(prim)
+                if data is not None:
+                    z.append((data[2], prim))
+                    z.append((data[3], prim))
+            if prim.GetType() == CSPrimitives.PrimitiveType.LINPOLY:
+                try:
+                    z.append((prim.GetElevation() + prim.GetLength(), prim))
+                except Exception:  # noqa: BLE001
+                    pass
     z = list(set(z))
     z.sort(key=lambda x: x[0])
-    z.extend(box_coords_z)
     return z
 
 def process_z_coordinates(automesher, z, mesh_data):
@@ -158,79 +258,8 @@ def process_z_coordinates(automesher, z, mesh_data):
             mesh_data[2].append(z_val)            
 
 def process_single_polygon(automesher, prim, x, y, x_edges, y_edges, diagonal_edges):
-    if not hasattr(prim, 'GetType'):
-        port_coords_x, port_coords_y, port_coords_z = transfer_port_to_polygon(prim.start, prim.stop)
-        x.extend(port_coords_x)
-        y.extend(port_coords_y)
-        collect_edges(port_coords_x, port_coords_y, prim, x_edges, y_edges, diagonal_edges)
-    elif prim.GetType() == CSPrimitives.PrimitiveType.BOX:
-        box_coords_x, box_coords_y, box_coords_z = tranfer_box_to_polygon(prim)
-        x.extend(box_coords_x)
-        y.extend(box_coords_y)
-        collect_edges(box_coords_x, box_coords_y, prim, x_edges, y_edges, diagonal_edges)
-    else:
-        if not prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER and not prim.GetType() == CSPrimitives.PrimitiveType.CYLINDRICALSHELL:
-            xx, yy = prim.GetCoords()[0], prim.GetCoords()[1]   
-            x.extend(xx)
-            y.extend(yy)
-            if xx[-1] != xx[0] or yy[-1] != yy[0]:
-                xx = np.append(xx, xx[0])
-                yy = np.append(yy, yy[0])
-            collect_edges(xx, yy, prim, x_edges, y_edges, diagonal_edges)
-        if prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER:
-            start = prim.GetStart()
-            stop = prim.GetStop()
-            radius = prim.GetRadius()
-            x.extend([start[0]-radius, start[0]+radius])
-            y.extend([start[1]-radius, start[1]+radius])
-            x_edges.append([start[0]-radius, start[1] - radius, start[1] + radius, prim, False])
-            x_edges.append([start[0]+radius, start[1] - radius, start[1] + radius, prim, False])
-            y_edges.append([start[1]-radius, start[0] - radius, start[0] + radius, prim, False])
-            y_edges.append([start[1]+radius, start[0] - radius, start[0] + radius, prim, False])
-            automesher.found_circles.append([[start[0]-radius,start[0]+radius],[start[1]-radius, start[1]+radius]])
-        if prim.GetType() == CSPrimitives.PrimitiveType.CYLINDRICALSHELL:
-            start = prim.GetStart()
-            stop = prim.GetStop()
-            radius = prim.GetRadius()
-            thickness = prim.GetShellWidth()
-            x.extend([start[0]-radius-thickness/2, start[0]+radius+thickness/2])
-            y.extend([start[1]-radius-thickness/2, start[1]+radius+thickness/2])
-            x_edges.append([start[0]-radius, start[1] - radius, start[1] + radius, prim, False])
-            x_edges.append([start[0]+radius, start[1] - radius, start[1] + radius, prim, False])
-            x_edges.append([start[0]-radius-thickness/2, start[1] - radius - thickness/2, start[1] + radius + thickness/2, prim, False])
-            x_edges.append([start[0]+radius+thickness/2, start[1] - radius - thickness/2, start[1] + radius + thickness/2, prim, False])
-            y_edges.append([start[1]-radius, start[0] - radius, start[0] + radius, prim, False])
-            y_edges.append([start[1]+radius, start[0] - radius, start[0] + radius, prim, False])
-            y_edges.append([start[1]-radius-thickness/2, start[0] - radius - thickness/2, start[0] + radius + thickness/2, prim, False])
-            y_edges.append([start[1]+radius+thickness/2, start[0] - radius - thickness/2, start[0] + radius + thickness/2, prim, False])
-            automesher.found_circles.append([[start[0]-radius,start[0]+radius],[start[1]-radius,start[1]+radius]])
-            automesher.found_circles.append([[start[0]-radius-thickness/2,start[0]+radius+thickness/2],[start[1]-radius-thickness/2,start[1]+radius+thickness/2]])
-    # xx, yy = polygon.GetCoords()[0], polygon.GetCoords()[1]
+    process_primitive(automesher, prim, x, y, x_edges, y_edges, diagonal_edges)
 
-    # x = np.append(x, xx)
-    # y = np.append(y, yy)
-    # for i in range(len(xx) - 1):
-    #     if xx[i] != xx[i + 1] and yy[i] != yy[i + 1]:
-    #         diagonal_edges.append([xx[i], xx[i + 1], yy[i], yy[i + 1], polygon, False])
-    #     if xx[i] == xx[i + 1]:
-    #         x_edges.append([xx[i], yy[i], yy[i + 1], polygon, False])
-    #     if yy[i] == yy[i + 1]:
-    #         y_edges.append([yy[i], xx[i], xx[i + 1], polygon, False])       
-
-def distance_between_segments(p1, p2, q1, q2):
-    p = np.linspace(p1, p2, 10)
-    def point_to_line_distance(p, a, b):
-        # Projektion des Punktes p auf die Linie a-b
-        ap = p - a
-        ab = b - a
-        t = np.dot(ap, ab) / np.dot(ab, ab)
-        # t = np.clip(t, 0, 1)  # Projektion auf das Segment beschränken
-        closest_point = a + t * ab
-        return np.linalg.norm(p - closest_point)
-    distances = []
-    for p_point in p:
-        distances.append((point_to_line_distance(p_point, q1, q2), p_point, p1, p2, q1, q2))
-    return distances
 
 def detect_all_circles_in_polygon(automesher, polygon, min_points=20, tolerance=0.01):
     
@@ -295,15 +324,19 @@ def fit_circle_least_squares(x, y):
     return xc, yc, r
 
 def detect_all_arcs_in_polygon(automesher, polygon, min_points=10, tolerance=0.03, max_radius_dev=0.03):
-    
+
     if automesher.global_mesh_setup.get('use_arc_detection', False) is False:
         return []
     if isinstance(polygon, list):
         coords = [prim.GetCoords() for prim in polygon if hasattr(prim, 'GetCoords')]
+        if not coords:
+            return []
         x_coords = np.concatenate([coord[0] for coord in coords])
         y_coords = np.concatenate([coord[1] for coord in coords])
     else:
-        coords = polygon.GetCoords()
+        coords = polygon.GetCoords() if hasattr(polygon, 'GetCoords') else None
+        if coords is None:
+            return []
         x_coords, y_coords = np.array(coords[0]), np.array(coords[1])
     N = len(x_coords)
 
@@ -338,6 +371,8 @@ def detect_all_arcs_in_polygon(automesher, polygon, min_points=10, tolerance=0.0
 
 
 def is_circle_in_polygon(polygon, min_points=8, tolerance=0.01, return_segment=False):
+    if not hasattr(polygon, 'GetCoords'):
+        return (False, None, None) if return_segment else False
     coords = polygon.GetCoords()
     x_coords, y_coords = np.array(coords[0]), np.array(coords[1])
     N = len(x_coords)
@@ -427,6 +462,34 @@ def metal_edge(automesher, edges, x_coords, y_coords, mesh_data, direction):
     edges_to_remove = []
     mer = np.array([-1.0, 2.0]) / 3 * automesher.max_res 
     if automesher.global_mesh_setup.get('smooth_metal_edge', False) == 'one_third_two_thirds':
+        # Pre-pass: densify at ALL cylinder end discs regardless of edge pairing.
+        # Thin wires (e.g. Yagi elements, r=1 mm) have interleaved edges from
+        # multiple directors; consecutive edge pairs have tiny gaps that fail
+        # the [max_res, mesh_res] check. Handle cylinders separately.
+        _seen_cyl = set()
+        for edge in edges:
+            prim = edge[3]
+            _pid = id(prim)
+            if _pid in _seen_cyl:
+                continue
+            if not (hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER):
+                continue
+            if not (hasattr(prim, 'GetProperty') and isinstance(prim.GetProperty(), CSProperties.CSPropMetal)):
+                continue
+            _seen_cyl.add(_pid)
+            _radius = prim.GetRadius()
+            _start = prim.GetStart()
+            _stop = prim.GetStop()
+            _target = automesher.cylinder_end_lines[0 if direction == 'x' else 1]
+            for _end_pt in (_start, _stop):
+                _ex = _end_pt[0] if direction == 'x' else _end_pt[1]
+                _e1 = _ex - _radius
+                _e2 = _ex + _radius
+                _mid = (_e1 + _e2) / 2.0
+                _third = (_e2 - _e1) / 3.0
+                for _v in (_e1, _e1 + _third, _mid, _e2 - _third, _e2):
+                    if _v not in _target:
+                        _target.append(_v)
         for i in range(len(edges)-1):  # Iterate over a copy of the list
             edge = edges[i]
             next_edge = edges[i + 1]
@@ -444,7 +507,9 @@ def metal_edge(automesher, edges, x_coords, y_coords, mesh_data, direction):
                 x, y, x_edges, y_edges, diagonal_edges = [], [], [], [], []
                 process_primitive(automesher, edge[3], x, y, x_edges, y_edges, diagonal_edges)
                 coords = [x, y]
-                if abs(np.diff([edge[0], next_edge[0]])) <= automesher.mesh_res and abs(np.diff([edge[0], next_edge[0]])) >= automesher.max_res and abs(np.diff([edge[0], next_edge[0]])) >= 1.5:
+                _gap = abs(np.diff([edge[0], next_edge[0]]))
+                _min_gap = min(automesher.max_res, 1.5)
+                if _gap <= automesher.mesh_res and _gap >= _min_gap:
                         y1, y2 = edge[1], edge[2]
                         y1_next, y2_next = next_edge[1], next_edge[2]
                         if (y1 <= y1_next <= y2 or y1 >= y1_next >= y2 or

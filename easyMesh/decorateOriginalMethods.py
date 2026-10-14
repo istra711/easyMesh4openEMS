@@ -52,9 +52,18 @@ class MaterialWrapper:
     def AddCurve(self, *args, **kwargs):
         decorated_func = decorate_original_method(self.original_material.AddCurve, self._mesh_dict)
         return decorated_func(*args, **kwargs)
-    
+
     def AddPoint(self, *args, **kwargs):
         decorated_func = decorate_original_method(self.original_material.AddPoint, self._mesh_dict)
+        return decorated_func(*args, **kwargs)
+
+    def AddPolyhedron(self, *args, **kwargs):
+        # FreeCAD/STL triangle meshes (CSXCAD has no AddMesh)
+        decorated_func = decorate_original_method(self.original_material.AddPolyhedron, self._mesh_dict)
+        return decorated_func(*args, **kwargs)
+
+    def AddPolyhedronReader(self, *args, **kwargs):
+        decorated_func = decorate_original_method(self.original_material.AddPolyhedronReader, self._mesh_dict)
         return decorated_func(*args, **kwargs)
 
     def __getattr__(self, name):

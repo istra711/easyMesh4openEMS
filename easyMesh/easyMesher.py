@@ -35,6 +35,7 @@ class Automesher:
         self.mesh_with_different_mesh_res = []
         self.metal_edge_res = None
         self.wave_length = None
+        self.cylinder_end_lines = [[], [], []]  # x, y, z densification lines
 
     def GenMesh(self, CSX, global_mesh_setup, primitives_mesh_setup=None, properties_mesh_setup=None, **kw):
 
@@ -85,6 +86,11 @@ class Automesher:
             for n in range(3):
                 if self.mesh_data[primitive][0][n]:
                     grid.AddLine(n, self.mesh_data[primitive][0][n])
+        # Add cylinder end densification lines (added by metal_edge pre-pass).
+        # These bypass SmoothMeshLines which would otherwise merge them away.
+        for n in range(3):
+            if self.cylinder_end_lines[n]:
+                grid.AddLine(n, self.cylinder_end_lines[n])
 
     def get_mesh_data(self, polygon, grid, **kw):
 
