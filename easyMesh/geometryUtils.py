@@ -454,6 +454,35 @@ def xline_in_polygon(polygon, x_start, x_end, y_point):
 
     return True
 
+def _metal_edge_disc_bounds(prim):
+    """(x_lo, x_hi, y_lo, y_hi) of a polyhedral z-wire's cross-section, or None.
+
+    FreeCAD wire cylinders export as PolyhedronReader. CSXCAD exposes no
+    triangle/vertex API for it (GetNumVertices()==0 until ReadFile), so the
+    AABB is the only handle: a wire is a thin z-span whose xy half-extent is
+    far smaller than its length. Returns the xy extents so the metal_edge
+    pre-pass can densify x/y across the wire diameter like native cylinder
+    ends (which use radius around the axis position).
+    """
+    if not _is_polyhedron_type(prim):
+        return None
+    data = _prim_aabb_xy_z(prim)
+    if data is None:
+        return None
+    _x_coords, _y_coords, zmin, zmax = data
+    span = zmax - zmin
+    if span <= 0:
+        return None
+    xmin, xmax = min(_x_coords), max(_x_coords)
+    ymin, ymax = min(_y_coords), max(_y_coords)
+    half_xy = 0.5 * max(xmax - xmin, ymax - ymin)
+    # Wire: long and thin (z-span much larger than the xy half-extent). A
+    # patch/plate is comparable in xy and z, so it is left alone.
+    if half_xy <= 0 or span <= 4.0 * half_xy:
+        return None
+    return (xmin, xmax, ymin, ymax)
+
+
 def metal_edge(automesher, edges, x_coords, y_coords, mesh_data, direction):
 
     min_distance_x = calc_min_distance(x_coords)
@@ -466,30 +495,46 @@ def metal_edge(automesher, edges, x_coords, y_coords, mesh_data, direction):
         # Thin wires (e.g. Yagi elements, r=1 mm) have interleaved edges from
         # multiple directors; consecutive edge pairs have tiny gaps that fail
         # the [max_res, mesh_res] check. Handle cylinders separately.
-        _seen_cyl = set()
+        _seen_prim = set()
         for edge in edges:
             prim = edge[3]
             _pid = id(prim)
-            if _pid in _seen_cyl:
-                continue
-            if not (hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER):
+            if _pid in _seen_prim:
                 continue
             if not (hasattr(prim, 'GetProperty') and isinstance(prim.GetProperty(), CSProperties.CSPropMetal)):
                 continue
-            _seen_cyl.add(_pid)
-            _radius = prim.GetRadius()
-            _start = prim.GetStart()
-            _stop = prim.GetStop()
+            _seen_prim.add(_pid)
+            # Native cylinders: densify over the end disc (radius + one-third rule).
+            if hasattr(prim, 'GetType') and prim.GetType() == CSPrimitives.PrimitiveType.CYLINDER:
+                _radius = prim.GetRadius()
+                _start = prim.GetStart()
+                _stop = prim.GetStop()
+                _target = automesher.cylinder_end_lines[0 if direction == 'x' else 1]
+                for _end_pt in (_start, _stop):
+                    _ex = _end_pt[0] if direction == 'x' else _end_pt[1]
+                    _e1 = _ex - _radius
+                    _e2 = _ex + _radius
+                    _mid = (_e1 + _e2) / 2.0
+                    _third = (_e2 - _e1) / 3.0
+                    for _v in (_e1, _e1 + _third, _mid, _e2 - _third, _e2):
+                        if _v not in _target:
+                            _target.append(_v)
+                continue
+            # FreeCAD/STL cylinders imported as PolyhedronReader. Triangle edges
+            # sit a few nm apart at the tapered end discs; process_mesh_data then
+            # keeps both (both are "edges") and the CFL timestep collapses. Snap
+            # them onto the disc outline so the leftover cell is micron-scale.
+            _bnd = _metal_edge_disc_bounds(prim)
+            if _bnd is None:
+                continue
+            _xmin, _xmax, _ymin, _ymax = _bnd
+            _lo, _hi = (_xmin, _xmax) if direction == 'x' else (_ymin, _ymax)
             _target = automesher.cylinder_end_lines[0 if direction == 'x' else 1]
-            for _end_pt in (_start, _stop):
-                _ex = _end_pt[0] if direction == 'x' else _end_pt[1]
-                _e1 = _ex - _radius
-                _e2 = _ex + _radius
-                _mid = (_e1 + _e2) / 2.0
-                _third = (_e2 - _e1) / 3.0
-                for _v in (_e1, _e1 + _third, _mid, _e2 - _third, _e2):
-                    if _v not in _target:
-                        _target.append(_v)
+            _third = (_hi - _lo) / 3.0
+            for _v in (_lo, _lo + _third, (_lo + _hi) / 2.0, _hi - _third, _hi):
+                if _v not in _target:
+                    _target.append(_v)
+            continue
         for i in range(len(edges)-1):  # Iterate over a copy of the list
             edge = edges[i]
             next_edge = edges[i + 1]

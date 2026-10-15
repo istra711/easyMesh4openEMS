@@ -116,6 +116,13 @@ def adjust_mesh_parameters(automesher, unique_xedges, unique_yedges, z_coords, d
             for i in range(len(z_coords) - 1):
                 condition5 = abs(z_coords[i + 1][0] - z_coords[i][0]) <= automesher.min_cellsize_compare and abs(z_coords[i + 1][0] - z_coords[i][0]) >= 1.5
                 condition6 = abs(z_coords[i + 1][0] - z_coords[i][0]) > automesher.min_cellsize_compare and abs(z_coords[i + 1][0] - z_coords[i][0]) < automesher.max_res_compare
+                # A lumped port on z sits between two z_coords a few nm apart
+                # (STL float32 face vs float64 port box). linspace(num_lines)
+                # would place a ~5 nm cell next to the port face and the CFL
+                # timestep collapses. Only skip the nm-scale pairs here — real
+                # feature pairs (>= ~1 um) must still densify.
+                if 0 < abs(z_coords[i + 1][0] - z_coords[i][0]) < 1e-6:
+                    continue
                 if condition5 or condition6:
                     # distance_smaller_than_min_cellsize.append([abs(z_coords[i + 1][0] - z_coords[i][0]), z_coords[i][0], z_coords[i + 1][0]])
                     distance_smaller_than_min_cellsize_z.append([abs(z_coords[i + 1][0] - z_coords[i][0]), z_coords[i][0], z_coords[i + 1][0]])
@@ -440,10 +447,46 @@ def add_ports_to_mesh_data(automesher, mesh_data, edges, direction):
             # if not any(e[0] == edge[0] and e[4] is True for e in edges):
             edges.append(edge)
             # mesh_data.append(edge[0])
-    if direction == 'z': 
+    # Record exact lumped-port face endpoints so smoothing cannot merge the
+    # port gap shut. Only the two endpoints along the port axis are anchors —
+    # the transverse port-face coords are ordinary geometry edges. This must
+    # run before the z-edge loop below, which reads the anchors to flag faces.
+    if hasattr(automesher, 'port_anchor_lines'):
+        axis = {'x': 0, 'y': 1, 'z': 2}[direction]
+        for prim in automesher.primitives_mesh_setup:
+            if not hasattr(prim, 'priority'):
+                continue
+            try:
+                start = [float(c) for c in prim.start]
+                stop = [float(c) for c in prim.stop]
+            except Exception:
+                continue
+            # Record anchors on the port's excitation axis only: the two faces
+            # are at start[axis] and stop[axis], and the port spans that axis
+            # (start[axis] != stop[axis]). The original "<" never fired for the
+            # excitation axis (a z-port has start[2]!=stop[2]), so the anchors
+            # were empty and smoothing collapsed the port gap into one cell.
+            if direction == 'x' and abs(start[0] - stop[0]) > 1e-12:
+                automesher.port_anchor_lines[0].extend([start[0], stop[0]])
+            elif direction == 'y' and abs(start[1] - stop[1]) > 1e-12:
+                automesher.port_anchor_lines[1].extend([start[1], stop[1]])
+            elif direction == 'z' and abs(start[2] - stop[2]) > 1e-12:
+                automesher.port_anchor_lines[2].extend([start[2], stop[2]])
+
+    if direction == 'z':
         for edge in zedges:
             mesh_data.append(edge[0])
-            edges.append(edge)
+            # z_coords is a list of (z, prim) tuples (collect_z_coordinates).
+            # Appending the bare float here made a mixed list that later broke
+            # sorting; process_mesh_data only needs the coordinate.
+            is_anchor = any(abs(float(edge[0]) - a) < 1e-12
+                            for a in getattr(automesher, 'port_anchor_lines', [[], [], []])[2])
+            # Port faces must stay separate mesh cells. process_mesh_data keeps
+            # a pair of adjacent lines when both are edges; mark the faces as
+            # edges so the gap is not collapsed into one cell that short-circuits
+            # the port. SmoothMeshLines otherwise interpolates a line through
+            # the gap centre.
+            edges.append((edge[0], None, None, edge[3], is_anchor))
 
     if direction in ['x', 'y'] and automesher.global_mesh_setup.get('handle_closely_placed_edges'):
         edges.sort(key=lambda edge: edge[0])

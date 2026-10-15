@@ -30,6 +30,9 @@ class Automesher:
         self.max_cellsize = None
         self.num_lines = None
         self.min_cellsize_changed = False
+        # Port face endpoints that SmoothMeshLines would otherwise merge away.
+        # Re-inserted after smoothing so lumped-port gaps stay open.
+        self.port_anchor_lines = [[], [], []]
         self.found_circles = []
         self.mesh_with_max_cell_size = [[], [], []]  # x, y, z
         self.mesh_with_different_mesh_res = []
@@ -88,9 +91,16 @@ class Automesher:
                     grid.AddLine(n, self.mesh_data[primitive][0][n])
         # Add cylinder end densification lines (added by metal_edge pre-pass).
         # These bypass SmoothMeshLines which would otherwise merge them away.
+        # Dedupe first: a duplicate entry becomes a zero-size FDTD cell.
         for n in range(3):
             if self.cylinder_end_lines[n]:
-                grid.AddLine(n, self.cylinder_end_lines[n])
+                grid.AddLine(n, sorted(set(float(v) for v in self.cylinder_end_lines[n])))
+        # NOTE: lumped-port face endpoints are NOT re-inserted here. They are
+        # already present as ordinary mesh lines in mesh_data (the metal arms'
+        # end faces coincide with the port faces), and meshProcessing's
+        # _densify_port_gap restore keeps them after smoothing. Re-adding them
+        # here produced exact-duplicate grid lines → zero-size cells that
+        # collapse the CFL timestep.
 
     def get_mesh_data(self, polygon, grid, **kw):
 
@@ -161,13 +171,18 @@ class Automesher:
         geometryUtils.detect_all_circles_in_polygon(self, polygon)
         meshingUtils.handle_circular_segments(self, polygon, mesh_data)
 
-        # Add Ports to the mesh_data
+        # Add Ports to the mesh_data (also records port face anchors)
         meshingUtils.add_ports_to_mesh_data(self, mesh_data[0], x_edges, 'x')
         meshingUtils.add_ports_to_mesh_data(self, mesh_data[1], y_edges, 'y')
         meshingUtils.add_ports_to_mesh_data(self, mesh_data[2], z_coords, 'z')
 
         # Smooth and process the mesh lines
-        meshProcessing.smooth_and_process_mesh_lines(self, mesh_data, polygon, grid, x_edges, y_edges, z_coords, unique_xedges, unique_yedges, z_coords, mesh_map) 
+        meshProcessing.smooth_and_process_mesh_lines(self, mesh_data, polygon, grid, x_edges, y_edges, z_coords, unique_xedges, unique_yedges, z_coords, mesh_map)
+
+        # Port face endpoints must survive smoothing: a lumped port's start/stop
+        # span can be thinner than mesh_res, so SmoothMeshLines merges them into a
+        # single cell that short-circuits the port. The exact endpoints are already
+        # restored in meshProcessing.smooth_and_process_mesh_lines.
 
         # If no z-direction mesh_datas exist, set it to None
         if mesh_data[2] == []:

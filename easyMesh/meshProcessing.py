@@ -15,6 +15,17 @@ def smooth_and_process_mesh_lines(automesher, mesh_data, polygon, grid, x_edges,
     automesher.mesh_with_max_cell_size = [[], [], []]
     xmax, xmin, ymax, ymin, zmax, zmin = max(mesh_data[0]), min(mesh_data[0]), max(mesh_data[1]), min(mesh_data[1]), max(mesh_data[2]), min(mesh_data[2])
 
+    # Record lumped-port face endpoints so they can be restored after smoothing.
+    port_anchors = [[], [], []]
+    for axis in range(3):
+        if not getattr(automesher, 'port_anchor_lines', None):
+            continue
+        for coord in automesher.port_anchor_lines[axis]:
+            if not any(abs(float(line) - float(coord)) < 1e-12 for line in mesh_data[axis]):
+                mesh_data[axis].append(float(coord))
+        mesh_data[axis] = sorted(set(mesh_data[axis]))
+        port_anchors[axis] = sorted(set(float(a) for a in automesher.port_anchor_lines[axis]))
+
     if isinstance(polygon, list):
         if automesher.min_cellsize_changed:
             if not any(automesher.primitives_mesh_setup.get(prim, {}).get('edges_only', False) for prim in polygon):
@@ -502,6 +513,56 @@ def smooth_and_process_mesh_lines(automesher, mesh_data, polygon, grid, x_edges,
     mesh_data[0] = process_mesh_data(mesh_data[0], automesher.min_cellsize, x_edges)
     mesh_data[1] = process_mesh_data(mesh_data[1], automesher.min_cellsize, y_edges)
     mesh_data[2] = process_mesh_data(mesh_data[2], automesher.min_cellsize_z, z_coords)
+
+    # Re-insert lumped-port face endpoints. process_mesh_data / SmoothMeshLines
+    # merge lines closer than min_cellsize; a thin port gap would collapse into
+    # a single cell that short-circuits the port. Same pattern as cylinder_end_lines.
+    if getattr(automesher, 'port_anchor_lines', None):
+        for axis in range(3):
+            anchors = sorted(set(float(a) for a in automesher.port_anchor_lines[axis]))
+            if len(anchors) < 2 or not mesh_data[axis]:
+                continue
+            existing = sorted(set(float(line) for line in mesh_data[axis]))
+            # Drop SmoothMeshLines' interpolated line through the gap centre
+            # (e.g. 0.0 for a gap symmetric about the origin). The gap must stay
+            # two open cells between the port faces; a spurious mid-line would
+            # short-circuit the port. Also snap-drop geometry twins that sit a
+            # few float32-ULPs outside the faces: STL stores float32, the port
+            # box is float64, so the metal face lands ~5 nm away from the port
+            # face and process_mesh_data keeps both (both are "edges"). That
+            # leftover nm cell collapses the CFL timestep. The anchors win.
+            lo, hi = anchors[0], anchors[-1]
+            snap = 1e-5
+            existing = [L for L in existing if not (lo - snap < L < hi + snap)]
+            mesh_data[axis] = _densify_port_gap(automesher, axis, existing, anchors)
+
+def _densify_port_gap(automesher, axis, lines, anchors, max_extra=24):
+    """Keep the port faces as mesh lines and refine the gap between them.
+
+    A lumped port whose start/stop span is thinner than min_cellsize ends up as
+    a single FDTD cell. That cell's Courant limit is set by its thinnest
+    dimension, so an under-resolved gap either short-circuits the port or forces
+    a multi-day timestep. Fill the gap with evenly spaced lines at roughly
+    min_cellsize (at most max_extra interior lines) and re-insert the exact
+    endpoints. The gap is densified rather than collapsed — the neighbours just
+    outside stay where they are, so the surrounding mesh is unchanged.
+    """
+    lo, hi = float(anchors[0]), float(anchors[-1])
+    if not (hi > lo):
+        return sorted(set(lines) | set(anchors))
+
+    min_cs = getattr(automesher, 'min_cellsize', None) or 0.0
+    if axis == 2:
+        min_cs = getattr(automesher, 'min_cellsize_z', None) or min_cs
+    if not (min_cs > 0):
+        return sorted(set(lines) | set(anchors))
+
+    n_int = int((hi - lo) / min_cs) - 1
+    n_int = max(0, min(n_int, max_extra))
+    interior = [lo + (hi - lo) * k / (n_int + 1) for k in range(1, n_int + 1)]
+    # Drop interior lines that would sit on top of an existing neighbour.
+    interior = [c for c in interior if not any(abs(c - L) < 1e-9 for L in lines)]
+    return sorted(set(lines) | set(anchors) | set(interior))
 
 def process_mesh_data(mesh_data, min_cellsize, unique_edges):
     mesh_data = sorted(mesh_data)
