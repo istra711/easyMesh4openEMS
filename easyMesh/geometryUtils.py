@@ -261,6 +261,40 @@ def process_single_polygon(automesher, prim, x, y, x_edges, y_edges, diagonal_ed
     process_primitive(automesher, prim, x, y, x_edges, y_edges, diagonal_edges)
 
 
+def distance_between_segments(p1, p2, q1, q2):
+    """Closest-approach samples between two 2-D segments.
+
+    ``meshingUtils.handle_diagonal_edges`` uses this to grade the mesh between
+    two nearby non-axis-aligned edges (e.g. the two parallel 45 deg chamfers
+    of a CP patch). Returns one record per sample point on ``p1``-``p2``::
+
+        (distance, sampled_point, p1, p2, q1, q2)
+
+    The caller filters the records by ``distance`` and uses the sampled points
+    to find the coordinate range between the edges.
+
+    Restored verbatim from the upstream package
+    (github.com/MustafaAlchalabi/easyMesh4openEMS, ``easyMesh/geometryUtils.py``):
+    the bundled copy had lost it, so every polygon with two parallel diagonal
+    edges aborted the mesh build with ``AttributeError``.
+    """
+    p = np.linspace(p1, p2, 10)
+
+    def point_to_line_distance(p, a, b):
+        # distance from p to the (infinite) line through a-b
+        ap = p - a
+        ab = b - a
+        t = np.dot(ap, ab) / np.dot(ab, ab)
+        # t = np.clip(t, 0, 1)  # projection onto the segment
+        closest_point = a + t * ab
+        return np.linalg.norm(p - closest_point)
+
+    distances = []
+    for p_point in p:
+        distances.append((point_to_line_distance(p_point, q1, q2), p_point, p1, p2, q1, q2))
+    return distances
+
+
 def detect_all_circles_in_polygon(automesher, polygon, min_points=20, tolerance=0.01):
     
     if automesher.global_mesh_setup.get('use_circle_detection', False) is False:
