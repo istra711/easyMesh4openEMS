@@ -125,13 +125,39 @@ def _prim_aabb_xy_z(prim):
     return x_coords, y_coords, zmin, zmax
 
 
+def _prim_vertices(prim):
+    """Vertices exposed by CSXCAD Polyhedron/PolyhedronReader, or []."""
+    try:
+        n = int(prim.GetNumVertices())
+    except Exception:  # noqa: BLE001
+        return []
+    if n <= 0:
+        return []
+    out = []
+    try:
+        for i in range(n):
+            v = prim.GetVertex(i)
+            out.append((float(v[0]), float(v[1]), float(v[2])))
+    except Exception:  # noqa: BLE001
+        return []
+    return out
+
+
 def _handle_polyhedron(automesher, prim, x, y, x_edges, y_edges, diagonal_edges):
     data = _prim_aabb_xy_z(prim)
     if data is None:
         return
     x_coords, y_coords, _zmin, _zmax = data
-    x.extend(x_coords)
-    y.extend(y_coords)
+    vertices = _prim_vertices(prim)
+    if vertices:
+        # PolyhedronReader: use the real vertices instead of only the AABB.
+        # For an extruded trace this puts grid lines on the actual outline
+        # (including rounded/chamfered ends), not just on its bounding box.
+        x.extend(sorted({round(v[0], 9) for v in vertices}))
+        y.extend(sorted({round(v[1], 9) for v in vertices}))
+    else:
+        x.extend(x_coords)
+        y.extend(y_coords)
     collect_edges(x_coords, y_coords, prim, x_edges, y_edges, diagonal_edges)
 
 
